@@ -2,7 +2,21 @@
 Postgres archive (fmp_bulk + fmp_feeds tables)."""
 
 from openbb_core.provider.abstract.provider import Provider
-from openbb_sharkquant.models.equity_profile import SharkQuantEquityProfileFetcher
+from openbb_sharkquant.models.balance_sheet import (
+    SharkQuantBalanceSheetFetcher,
+)
+from openbb_sharkquant.models.cash_flow import (
+    SharkQuantCashFlowStatementFetcher,
+)
+from openbb_sharkquant.models.equity_profile import (
+    SharkQuantEquityProfileFetcher,
+)
+from openbb_sharkquant.models.financial_ratios import (
+    SharkQuantFinancialRatiosFetcher,
+)
+from openbb_sharkquant.models.income_statement import (
+    SharkQuantIncomeStatementFetcher,
+)
 
 # No declared credentials: the provider reads DATABASE_URL from the
 # process environment (set by docker-compose). Declaring it here would
@@ -18,6 +32,10 @@ sharkquant_provider = Provider(
     website="https://sharkquant.ai",
     credentials=None,
     fetcher_dict={
+        "BalanceSheet": SharkQuantBalanceSheetFetcher,
+        "CashFlowStatement": SharkQuantCashFlowStatementFetcher,
         "EquityInfo": SharkQuantEquityProfileFetcher,
+        "FinancialRatios": SharkQuantFinancialRatiosFetcher,
+        "IncomeStatement": SharkQuantIncomeStatementFetcher,
     },
 )
