@@ -1,0 +1,1 @@
+"""SharkQuant FinanceToolkit Extension."""

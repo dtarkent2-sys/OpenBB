@@ -10,6 +10,7 @@ packages = [{ include = "openbb_sharkquant" }]
 [tool.poetry.dependencies]
 python = ">=3.10,<4"
 openbb-core = "^1.6.3"
+openbb-fmp = "^1.6"
 psycopg2-binary = "^2.9"
 
 [build-system]
