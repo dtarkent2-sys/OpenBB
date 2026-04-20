@@ -1,0 +1,20 @@
+[tool.poetry]
+name = "openbb-sharkquant-flow"
+version = "0.1.0"
+description = "SharkQuant Flow extension — proxies the full SuperQuant / Exponential analytics surface (equity flow, COT, macro, short interest, security master) through openbb.sharkquant.ai so customers only connect one backend."
+authors = ["SharkQuant <david@sharkquant.ai>"]
+license = "AGPL-3.0-only"
+readme = "README.md"
+packages = [{ include = "openbb_sharkquant_flow" }]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<4"
+openbb-core = "^1.6.3"
+httpx = "^0.27"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.plugins."openbb_core_extension"]
+sharkquant_flow = "openbb_sharkquant_flow.router:router"
