@@ -125,11 +125,11 @@ _MODELS = [
     "get_dupont_analysis",
     "get_enterprise_value_breakdown",
     "get_extended_dupont_analysis",
-    "get_gorden_growth_model",
     "get_piotroski_score",
     "get_present_value_of_growth_opportunities",
     "get_weighted_average_cost_of_capital",
-    # intrinsic_valuation requires user-supplied growth/WACC; handled separately below.
+    # intrinsic_valuation + gorden_growth_model require user-supplied
+    # growth/discount rate inputs — handled separately below.
 ]
 
 _PERFORMANCE = [
@@ -247,7 +247,10 @@ def _make_endpoint(
             # FT occasionally raises KeyError/ValueError when the symbol has
             # incomplete statements. Surface a typed empty result so the
             # endpoint stays a 200, not a 500.
-            return OBBject(results=[], warnings=[{"message": str(exc)}])
+            return OBBject(
+                results=[],
+                warnings=[{"category": "FinanceToolkit", "message": str(exc)}],
+            )
 
         # Performance/risk commonly return scalars or per-symbol Series;
         # ratios/models/technicals return DataFrames. Try series-shape
@@ -330,5 +333,42 @@ def models_intrinsic_valuation(
             cash_flow_type=cash_flow_type,
         )
     except Exception as exc:
-        return OBBject(results=[], warnings=[{"message": str(exc)}])
+        return OBBject(
+            results=[],
+            warnings=[{"category": "FinanceToolkit", "message": str(exc)}],
+        )
+    return OBBject(results=df_to_data(df))
+
+
+@router.command(
+    methods=["GET"],
+    examples=[APIEx(parameters={"symbol": "AAPL"})],
+)
+def models_gorden_growth_model(
+    symbol: str,
+    rate_of_return: float = 0.09,
+    growth_rate: float = 0.03,
+    project_periods: int = 5,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> OBBject[list[Data]]:
+    """Gordon Growth (Dividend Discount) Model.
+
+    FinanceToolkit requires investor required return + dividend growth
+    rate to discount future dividends. Sensible defaults (9% required
+    return, 3% growth, 5 projection periods) applied so the endpoint
+    returns a result out-of-the-box; override for symbol-specific runs.
+    """
+    t = build_toolkit(symbol, start_date=start_date, end_date=end_date)
+    try:
+        df = t.models.get_gorden_growth_model(
+            rate_of_return=rate_of_return,
+            growth_rate=growth_rate,
+            project_periods=project_periods,
+        )
+    except Exception as exc:
+        return OBBject(
+            results=[],
+            warnings=[{"category": "FinanceToolkit", "message": str(exc)}],
+        )
     return OBBject(results=df_to_data(df))
