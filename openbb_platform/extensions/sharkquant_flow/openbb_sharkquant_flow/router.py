@@ -148,9 +148,62 @@ _REFERENCE = [
     ("security_master", "security_master", "Equity universe security master."),
 ]
 
+# Upstream uses an /api/ prefix for the options suite (the rest of the analytics
+# routes are bare), so options entries embed it in their upstream_path.
+# options_gex_dex is intentionally absent — it has a locally-computed handler
+# below that registers the same external path against Theta Terminal + FMP.
+_OPTIONS = [
+    ("options_cp_ratio", "api/options_cp_ratio",
+     "Options call/put ratio (per-strike or aggregate)."),
+    ("options_cross_section", "api/options_cross_section",
+     "Per-strike options cross-section snapshot."),
+    ("options_expiration_heatmap", "api/options_expiration_heatmap",
+     "Open-interest / volume heatmap across strike × expiration."),
+    ("options_greek_cross_section", "api/options_greek_cross_section",
+     "Per-strike greeks (delta/gamma/vega/theta) cross-section."),
+    ("options_greek_exposure_by_expiration", "api/options_greek_exposure_by_expiration",
+     "Aggregated dealer greek exposure bucketed by expiration."),
+    ("options_intraday_cum_premium", "api/options_intraday_cum_premium",
+     "Intraday cumulative premium (call-vs-put split)."),
+    ("options_intraday_cum_premium_breakdown", "api/options_intraday_cum_premium_breakdown",
+     "Intraday cumulative premium by expiration / strike bucket."),
+    ("options_intraday_cumflow", "api/options_intraday_cumflow",
+     "Intraday cumulative options net flow."),
+    ("options_intraday_cumflow_breakdown", "api/options_intraday_cumflow_breakdown",
+     "Intraday cumulative net flow by expiration / strike bucket."),
+    ("options_intraday_delta_flow", "api/options_intraday_delta_flow",
+     "Intraday delta-weighted options flow."),
+    ("options_intraday_delta_flow_breakdown", "api/options_intraday_delta_flow_breakdown",
+     "Intraday delta-weighted flow by expiration / strike bucket."),
+    ("options_intraday_gamma_flow", "api/options_intraday_gamma_flow",
+     "Intraday gamma-weighted options flow."),
+    ("options_intraday_gamma_flow_breakdown", "api/options_intraday_gamma_flow_breakdown",
+     "Intraday gamma-weighted flow by expiration / strike bucket."),
+    ("options_intraday_greek_flow", "api/options_intraday_greek_flow",
+     "Combined intraday greek-weighted flow series."),
+    ("options_intraday_vega_flow", "api/options_intraday_vega_flow",
+     "Intraday vega-weighted options flow."),
+    ("options_intraday_vega_flow_breakdown", "api/options_intraday_vega_flow_breakdown",
+     "Intraday vega-weighted flow by expiration / strike bucket."),
+    ("options_iv_smile", "api/options_iv_smile",
+     "Implied-volatility smile across strikes for an expiration."),
+    ("options_kpi_metrics", "api/options_kpi_metrics",
+     "Headline options KPI metrics (gamma flip, max pain, etc.)."),
+    ("options_net_flow_by_expiration", "api/options_net_flow_by_expiration",
+     "Net options flow bucketed by expiration."),
+    ("options_price_greeks", "api/options_price_greeks",
+     "Time-series of price + greeks for a single contract."),
+    ("options_top_contracts", "api/options_top_contracts",
+     "Top contracts by volume / OI / premium."),
+    ("options_volume_by_expiration", "api/options_volume_by_expiration",
+     "Options volume bucketed by expiration."),
+    ("options_volume_by_strike", "api/options_volume_by_strike",
+     "Options volume bucketed by strike."),
+]
+
 _ALL_ENDPOINTS = (
     _EQUITY_FLOW + _SHORT_INTEREST + _COT_FUTURES + _MACRO + _PRICE +
-    _INELASTICITY + _REFERENCE
+    _INELASTICITY + _REFERENCE + _OPTIONS
 )
 
 
@@ -171,11 +224,13 @@ def _make_proxy(upstream_path: str, description: str) -> Callable:
         symbol: Optional[str] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        asof_date: Optional[str] = None,
         product: Optional[str] = None,
         product_name: Optional[str] = None,
         sector: Optional[str] = None,
         index: Optional[str] = None,
         interval: Optional[str] = None,
+        freq: Optional[str] = None,
         flow_method: Optional[str] = None,
         detrend_window: Optional[int] = None,
         detrend_method: Optional[str] = None,
@@ -185,17 +240,28 @@ def _make_proxy(upstream_path: str, description: str) -> Callable:
         category: Optional[str] = None,
         identifier: Optional[str] = None,
         signal: Optional[str] = None,
+        model: Optional[str] = None,
+        cp_filter: Optional[str] = None,
+        expiration: Optional[str] = None,
+        expiration_filter: Optional[str] = None,
+        strike: Optional[float] = None,
+        strike_min: Optional[float] = None,
+        strike_max: Optional[float] = None,
+        strike_filter: Optional[str] = None,
+        max_expiration_date: Optional[str] = None,
     ) -> OBBject[list[Data]]:
         """Auto-generated SuperQuant proxy."""
         params = {
             "symbol": symbol,
             "start_date": start_date,
             "end_date": end_date,
+            "asof_date": asof_date,
             "product": product,
             "product_name": product_name,
             "sector": sector,
             "index": index,
             "interval": interval,
+            "freq": freq,
             "flow_method": flow_method,
             "detrend_window": detrend_window,
             "detrend_method": detrend_method,
@@ -205,6 +271,15 @@ def _make_proxy(upstream_path: str, description: str) -> Callable:
             "category": category,
             "identifier": identifier,
             "signal": signal,
+            "model": model,
+            "cp_filter": cp_filter,
+            "expiration": expiration,
+            "expiration_filter": expiration_filter,
+            "strike": strike,
+            "strike_min": strike_min,
+            "strike_max": strike_max,
+            "strike_filter": strike_filter,
+            "max_expiration_date": max_expiration_date,
         }
         payload = _call_upstream(upstream_path, params)
         return OBBject(results=_to_data(payload))
