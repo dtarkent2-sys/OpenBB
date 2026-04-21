@@ -224,3 +224,18 @@ for route_suffix, upstream_path, description in _ALL_ENDPOINTS:
         methods=["GET"],
         examples=[APIEx(parameters={"symbol": "AAPL"})],
     )(handler)
+
+
+# =============================================================================
+# Locally-computed endpoints — compute against Theta Terminal + FMP instead of
+# proxying SuperQuant. Each replaces a same-named upstream route so the
+# externally visible path /api/v1/sharkquant_flow/<name> stays constant.
+# =============================================================================
+from openbb_sharkquant_flow.handlers.options_gex_dex import (  # noqa: E402
+    options_gex_dex,
+)
+
+router.command(
+    methods=["GET"],
+    examples=[APIEx(parameters={"symbol": "SPY", "expiration": "20260516"})],
+)(options_gex_dex)
