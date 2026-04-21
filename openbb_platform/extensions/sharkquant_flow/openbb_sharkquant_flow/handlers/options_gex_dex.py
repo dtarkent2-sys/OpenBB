@@ -13,7 +13,10 @@ Dealer convention used here (dealers long calls / short puts to the street):
 Flip the sign at the caller if you want the street-side (retail-long) view.
 """
 
-from __future__ import annotations
+# NOTE: no `from __future__ import annotations` — pydantic's OpenAPI generator
+# can't resolve `OBBject[list[Data]]` as a ForwardRef, which crashes openbb-api
+# on startup. Keep annotations as real types on any handler registered via
+# @router.command.
 
 from typing import Optional
 
