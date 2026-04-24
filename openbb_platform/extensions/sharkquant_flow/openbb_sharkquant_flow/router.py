@@ -15,6 +15,9 @@ self-hosted Postgres cache, or a local dev instance.
 import inspect
 import os
 import textwrap
+import threading
+import time
+from collections import defaultdict
 from typing import Any, Callable, Optional
 
 from openbb_core.app.model.example import APIEx
@@ -148,6 +151,63 @@ def _call_upstream(path: str, params: dict) -> Any:
                 upstream_body=payload,
             )
     return payload
+
+
+def _looks_like_plotly(payload: Any) -> bool:
+    """True when `payload` is a Plotly figure spec (has `data` as a list of
+    trace dicts AND typically a `layout`).
+
+    Used by P4 chart-vs-data split to decide whether to unwrap.
+    """
+    if not isinstance(payload, dict):
+        return False
+    data = payload.get("data")
+    if not (isinstance(data, list) and data and isinstance(data[0], dict)):
+        return False
+    # Plotly traces have a `type` key (scatter / bar / heatmap / etc.). If
+    # even one trace lacks it the payload is probably our own tabular shape
+    # pretending to be a figure.
+    return any("type" in trace or ("x" in trace and "y" in trace) for trace in data)
+
+
+def _plotly_to_data(figure: dict) -> list[Data]:
+    """Extract a data-shaped rows list from a Plotly figure spec.
+
+    For each trace, zips its x/y arrays into per-point rows stamped with
+    the trace name and type. Heatmaps (z array) get flattened to
+    (trace, row_idx, col_idx, value) rows. Unknown shapes pass through
+    with the raw trace dict so the caller can still inspect them.
+    """
+    out: list[Data] = []
+    for trace in figure.get("data", []):
+        if not isinstance(trace, dict):
+            continue
+        tname = trace.get("name") or trace.get("type") or "trace"
+        ttype = trace.get("type", "scatter")
+        xs = trace.get("x")
+        ys = trace.get("y")
+        zs = trace.get("z")
+        # Heatmap / 2-D surface.
+        if isinstance(zs, list) and zs and isinstance(zs[0], (list, tuple)):
+            for r_idx, row in enumerate(zs):
+                for c_idx, val in enumerate(row):
+                    out.append(Data(
+                        trace=tname, type=ttype,
+                        row=r_idx, col=c_idx, value=val,
+                    ))
+            continue
+        # Scatter / line / bar — zip xs/ys.
+        if isinstance(xs, list) and isinstance(ys, list):
+            for x, y in zip(xs, ys):
+                out.append(Data(trace=tname, type=ttype, x=x, y=y))
+            continue
+        # Unknown trace shape — pass through the primary keys so caller
+        # can still inspect.
+        out.append(Data(
+            trace=tname, type=ttype,
+            **{k: v for k, v in trace.items() if k not in ("data", "layout")},
+        ))
+    return out
 
 
 def _to_data(payload: Any) -> list[Data]:
@@ -428,34 +488,34 @@ _SHORT_INTEREST = [
 
 _COT_FUTURES = [
     ("apollo_positioning", "apollo_positioning_dashboard",
-     ("product",), (),
+     ("product",), ("format",),
      "Apollo-vs-COT futures positioning dashboard. `product` must be a canonical upstream label; aliases (ES, SPY, GC, …) are resolved automatically — see apollo_list_products."),
     ("apollo_positioning_extremes", "apollo_positioning_extremes",
-     ("product",), (),
+     ("product",), ("format",),
      "Apollo futures positioning extremes. Same product-alias rules as apollo_positioning."),
     ("cot_summary_disag", "cot_summary_disag_dashboard",
-     (), ("product", "product_name", "category", "report_type"),
+     (), ("product", "product_name", "category", "report_type", "format"),
      "CFTC COT disaggregated summary dashboard."),
     ("cot_detail_disag", "cot_detail_disag_dashboard",
-     (), ("product", "product_name", "category", "report_type"),
+     (), ("product", "product_name", "category", "report_type", "format"),
      "CFTC COT disaggregated detail dashboard."),
 ]
 
 _MACRO = [
     ("macro_surprises", "macro_surprises_dashboard",
      (), ("symbol", "identifier", "start_datetime", "end_datetime", "rounded",
-          "futures_symbols", "frequency"),
+          "futures_symbols", "frequency", "format"),
      "Macro surprise index dashboard (Citi-surprise-index class)."),
     ("macro_predictions", "macro_predictions_dashboard",
-     (), ("symbol", "view", "start_datetime", "end_datetime", "overlays"),
+     (), ("symbol", "view", "start_datetime", "end_datetime", "overlays", "format"),
      "Macro predictions dashboard with optional overlay series."),
     ("macro_consensus", "macro_consensus_dashboard",
      (), ("identifier", "symbol", "view", "start_datetime", "end_datetime",
-          "show_actual", "consensus_view"),
+          "show_actual", "consensus_view", "format"),
      "Macro consensus dashboard comparing forecasts against actual prints."),
     ("macro_revisions", "macro_revisions_dashboard",
      (), ("symbol", "identifier", "start_datetime", "end_datetime",
-          "show_residuals", "show_abs_residuals", "rounded", "show_all_buckets"),
+          "show_residuals", "show_abs_residuals", "rounded", "show_all_buckets", "format"),
      "Macro forecast revisions dashboard."),
 ]
 
@@ -470,16 +530,16 @@ _PRICE = [
 
 _INELASTICITY = [
     ("market_inelasticity_summary", "market_inelasticity_summary",
-     (), (),
+     (), ("format",),
      "Market inelasticity summary (Koijen/Gabaix demand-system top-level view)."),
     ("market_inelasticity_timeseries", "market_inelasticity_timeseries",
-     ("ticker",), ("metric",),
+     ("ticker",), ("metric", "format"),
      "Market inelasticity time-series for a single ticker."),
     ("market_inelasticity_scatter", "market_inelasticity_scatter",
-     ("ticker",), ("stage",),
+     ("ticker",), ("stage", "format"),
      "Market inelasticity scatter by stage (stage_1 / stage_2 / stage_3)."),
     ("market_inelasticity_cross_sectional", "market_inelasticity_cross_sectional",
-     (), ("metric",),
+     (), ("metric", "format"),
      "Market inelasticity cross-sectional snapshot across tickers."),
 ]
 
@@ -701,6 +761,13 @@ _PARAM_TYPES: dict[str, tuple[type, Any, str]] = {
     "show_all_buckets": (bool, None, "Include all histogram buckets."),
     "futures_symbols": (str, None, "Comma-separated futures symbols to overlay."),
     "frequency": (str, None, "Release frequency. Common: 'daily' | 'weekly' | 'monthly' | 'quarterly'."),
+    # P4 — output format control. Dashboard endpoints upstream return a full
+    # Plotly figure spec (~12KB per call) with the actual values buried in
+    # figure.data[N].y arrays. format='data' (default) extracts structured
+    # rows; format='plotly' passes the raw figure through for callers that
+    # need to render it directly. ~10x token savings on affected tools.
+    "format": (str, "data",
+               "Output format: 'data' returns structured rows (default, recommended). 'plotly' returns the raw Plotly figure JSON for direct rendering."),
 }
 
 
@@ -784,6 +851,41 @@ def _make_typed_proxy(
     return fn
 
 
+# =============================================================================
+# P5 — per-call stats. Every _execute_proxy call stamps this in-memory table
+# so `sharkquant_flow_health` can summarize the top offenders without external
+# monitoring infra. Thread-safe because openbb-api serves handlers via thread
+# pool; defaultdict access under GIL is fine for the counters here but we
+# guard the occasional dict-resize with a lock.
+# =============================================================================
+_HEALTH_LOCK = threading.Lock()
+_CALL_STATS: dict[str, dict] = defaultdict(lambda: {
+    "total": 0,
+    "success": 0,
+    "errors_by_code": defaultdict(int),
+    "last_latency_ms": None,
+    "last_error_code": None,
+    "last_success_at": None,
+    "last_error_at": None,
+})
+
+
+def _record_call(upstream_path: str, ok: bool, error_code: Optional[str], latency_ms: int) -> None:
+    """Record one call's outcome. Called from _execute_proxy's finally path."""
+    with _HEALTH_LOCK:
+        row = _CALL_STATS[upstream_path]
+        row["total"] += 1
+        row["last_latency_ms"] = latency_ms
+        now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        if ok:
+            row["success"] += 1
+            row["last_success_at"] = now_iso
+        else:
+            row["errors_by_code"][error_code or "unknown"] += 1
+            row["last_error_code"] = error_code
+            row["last_error_at"] = now_iso
+
+
 def _execute_proxy(
     upstream_path: str,
     params: dict,
@@ -820,11 +922,30 @@ def _execute_proxy(
                 )
             params["product"] = resolved
 
+    # P4: pop the `format` param off before forwarding — upstream doesn't
+    # know it; it controls how we shape the response on the way back.
+    fmt = params.pop("format", "data") if "format" in params else "data"
+
+    # P5: time the whole operation (including apollo resolution done above)
+    # and stamp the call stats.
+    t0 = time.monotonic()
+    err_code: Optional[str] = None
     try:
-        payload = _call_upstream(upstream_path, params)
-    except UpstreamError as err:
-        return _error_obbject(err, schema=schema)
-    return OBBject(results=_to_data(payload))
+        try:
+            payload = _call_upstream(upstream_path, params)
+        except UpstreamError as err:
+            err_code = err.code
+            return _error_obbject(err, schema=schema)
+
+        if fmt == "plotly":
+            return OBBject(results=_to_data(payload))
+        if _looks_like_plotly(payload):
+            return OBBject(results=_plotly_to_data(payload))
+        return OBBject(results=_to_data(payload))
+    finally:
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        _record_call(upstream_path, ok=err_code is None, error_code=err_code,
+                     latency_ms=latency_ms)
 
 
 for route_suffix, upstream_path, required, optional, description in _ALL_ENDPOINTS:
@@ -892,3 +1013,291 @@ router.command(
     methods=["GET"],
     examples=[APIEx(parameters={"symbol": "SPY", "expiration": "20260516"})],
 )(options_gex_dex)
+
+
+# =============================================================================
+# P2 — Progressive discovery catalog (sharkquant_catalog_list/schema/call).
+#
+# Three meta-tools that let callers discover every sharkquant_flow_* route
+# without blowing the MCP tool-list budget. The token economics win:
+# listing names + short descriptions is ~20x cheaper than loading every
+# tool's full schema upfront.
+#
+# Scope limitation: this catalog covers routes registered on THIS extension's
+# router. Full cross-extension catalog (spanning every OpenBB router) requires
+# changes to the MCP server's tool-registration filtering — flagged as
+# follow-up; the surface here establishes the pattern and proves it with the
+# ~50 sharkquant_flow tools.
+# =============================================================================
+
+
+def _iter_catalog_entries():
+    """Yield (name, endpoint_fn, description) for every registered route."""
+    for route in router.api_router.routes:
+        fn = getattr(route, "endpoint", None)
+        if fn is None:
+            continue
+        name = getattr(fn, "__name__", None) or str(getattr(route, "path", "?"))
+        # Strip any inherited "sharkquant_flow_" prefix added by the factory
+        # so catalog-list names match the tool names callers actually use.
+        pretty = name.replace("sharkquant_flow_api_", "").replace("sharkquant_flow_", "")
+        # Exclude the catalog tools themselves and other meta-routes so the
+        # caller can't spider into /list from /call.
+        if pretty.startswith("catalog_") or pretty.startswith("_"):
+            continue
+        desc = (fn.__doc__ or "").strip().splitlines()[0] if fn.__doc__ else ""
+        yield pretty, fn, desc
+
+
+def _lookup_catalog_fn(tool_name: str):
+    """Return the endpoint callable for `tool_name` or None."""
+    for pretty, fn, _desc in _iter_catalog_entries():
+        if pretty == tool_name:
+            return fn
+    return None
+
+
+def _schema_for_fn(fn: Callable) -> dict:
+    """Return a JSON Schema for fn's parameters.
+
+    Prefers the pre-built schema stashed on fn.__sq_input_schema__ by
+    _make_typed_proxy (zero cost). Falls back to deriving from signature
+    for tools that weren't generated via the typed factory (options_gex_dex,
+    apollo_list_products, the catalog tools themselves).
+    """
+    prebuilt = getattr(fn, "__sq_input_schema__", None)
+    if isinstance(prebuilt, dict):
+        return prebuilt
+    # Fallback: derive from signature.
+    sig = inspect.signature(fn)
+    props: dict = {}
+    required: list[str] = []
+    for pname, param in sig.parameters.items():
+        annot = param.annotation
+        origin = getattr(annot, "__origin__", None)
+        # Unwrap Optional[X] → X, nullable=True.
+        nullable = False
+        if origin is not None and annot.__class__.__name__ in ("_UnionGenericAlias", "UnionType"):
+            args = [a for a in getattr(annot, "__args__", ()) if a is not type(None)]
+            if args and type(None) in getattr(annot, "__args__", ()):
+                nullable = True
+            if len(args) == 1:
+                annot = args[0]
+        type_name = {
+            str: "string", int: "integer", float: "number", bool: "boolean",
+        }.get(annot, "string")
+        prop: dict = {"type": type_name}
+        if nullable:
+            prop["nullable"] = True
+        if param.default is not inspect.Parameter.empty and param.default is not None:
+            prop["default"] = param.default
+        props[pname] = prop
+        if param.default is inspect.Parameter.empty:
+            required.append(pname)
+    schema: dict = {"type": "object", "properties": props}
+    if required:
+        schema["required"] = required
+    return schema
+
+
+def sharkquant_catalog_list() -> OBBject[list[Data]]:
+    """List every sharkquant_flow tool (names + one-line descriptions only).
+
+    **This returns names and descriptions, NOT full parameter schemas.** You
+    MUST call sharkquant_catalog_schema(tool_name) to retrieve the input
+    schema before calling sharkquant_catalog_call. Calling catalog_call
+    without first fetching the schema will fail because you won't know the
+    required parameters.
+
+    Workflow: catalog_list → catalog_schema(name) → catalog_call(name, args).
+
+    Note: the first-class sharkquant_flow_* tools (options_*, equity_flow_*,
+    apollo_positioning, market_inelasticity_*, macro_*) are still directly
+    callable by name — this catalog is the fallback discovery surface for
+    callers that want to browse the full extension without loading every
+    tool's schema into context.
+    """
+    entries = [
+        Data(name=name, description=desc)
+        for name, _fn, desc in sorted(_iter_catalog_entries(), key=lambda x: x[0])
+    ]
+    obb: OBBject[list[Data]] = OBBject(results=entries)
+    try:
+        obb.extra["total"] = len(entries)
+        obb.extra["workflow_hint"] = (
+            "call sharkquant_catalog_schema(tool_name) to get the input schema, "
+            "then sharkquant_catalog_call(tool_name, arguments) to execute"
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return obb
+
+
+def sharkquant_catalog_schema(tool_name: str) -> OBBject[list[Data]]:
+    """Get the full input-parameter JSON Schema for a catalog tool.
+
+    Args:
+      tool_name: The exact tool name returned by sharkquant_catalog_list.
+
+    Returns a single Data row with the JSON Schema describing types,
+    defaults, required fields, and per-param descriptions.
+    """
+    fn = _lookup_catalog_fn(tool_name)
+    if fn is None:
+        return _error_obbject(UpstreamError(
+            code="tool_not_found",
+            message=f"'{tool_name}' is not a sharkquant_flow catalog tool.",
+            hint="Call sharkquant_catalog_list to see available tools.",
+        ))
+    schema = _schema_for_fn(fn)
+    desc = (fn.__doc__ or "").strip()
+    return OBBject(results=[Data(
+        tool_name=tool_name,
+        description=desc,
+        input_schema=schema,
+    )])
+
+
+def sharkquant_catalog_call(tool_name: str, arguments: Optional[str] = None) -> OBBject[list[Data]]:
+    """Dispatch a call to any sharkquant_flow catalog tool.
+
+    Args:
+      tool_name: The exact tool name from sharkquant_catalog_list.
+      arguments: JSON-encoded object of arguments matching the schema from
+                 sharkquant_catalog_schema(tool_name). Example:
+                 '{"symbol": "SPY", "asof_date": "2026-04-23"}'.
+
+    On validation failure the error response includes the full input schema
+    (via the P3 schema-echo path) so you can self-correct without a separate
+    schema fetch.
+
+    IMPORTANT: You should call sharkquant_catalog_schema(tool_name) first
+    to retrieve the parameter contract before calling this tool. Catalog
+    call accepts JSON-encoded arguments as a single string param because
+    the MCP protocol pattern requires dispatch tools to have a single
+    generic `arguments` slot.
+    """
+    import json as _json
+    fn = _lookup_catalog_fn(tool_name)
+    if fn is None:
+        return _error_obbject(UpstreamError(
+            code="tool_not_found",
+            message=f"'{tool_name}' is not a sharkquant_flow catalog tool.",
+            hint="Call sharkquant_catalog_list to see available tools.",
+        ))
+    # Parse arguments JSON. Empty / missing is treated as {} so tools with
+    # all-optional params work without the caller having to pass '{}'.
+    if arguments is None or arguments == "":
+        parsed_args: dict = {}
+    else:
+        try:
+            parsed_args = _json.loads(arguments)
+        except _json.JSONDecodeError as e:
+            return _error_obbject(
+                UpstreamError(
+                    code="invalid_arguments_json",
+                    message=f"`arguments` must be a JSON-encoded object: {e}",
+                    hint='Example: \'{"symbol": "SPY", "asof_date": "2026-04-23"}\'',
+                ),
+                schema=_schema_for_fn(fn),
+            )
+        if not isinstance(parsed_args, dict):
+            return _error_obbject(
+                UpstreamError(
+                    code="invalid_arguments_json",
+                    message="`arguments` must decode to a JSON object, not an array/scalar.",
+                ),
+                schema=_schema_for_fn(fn),
+            )
+    # Validate required params are present up front so the error names the
+    # missing field instead of surfacing a raw TypeError from fn(**kwargs).
+    schema = _schema_for_fn(fn)
+    missing = [p for p in schema.get("required", []) if p not in parsed_args]
+    if missing:
+        return _error_obbject(
+            UpstreamError(
+                code="missing_required_arguments",
+                message=f"Missing required arguments: {missing}",
+            ),
+            schema=schema,
+        )
+    # Dispatch.
+    try:
+        return fn(**parsed_args)
+    except TypeError as e:
+        # Unknown kwarg — surface as validation error with schema.
+        return _error_obbject(
+            UpstreamError(
+                code="invalid_arguments",
+                message=str(e),
+            ),
+            schema=schema,
+        )
+
+
+router.command(methods=["GET"])(sharkquant_catalog_list)
+router.command(methods=["GET"])(sharkquant_catalog_schema)
+router.command(methods=["GET"])(sharkquant_catalog_call)
+
+
+# =============================================================================
+# P5 — health snapshot. Returns per-tool call counts, success rate, last
+# latency, and error-code histogram since the process started. Lightweight
+# enough for an external cron to hit every 60s without impact.
+# =============================================================================
+
+
+def sharkquant_flow_health(
+    min_calls: int = 0,
+    errors_only: bool = False,
+) -> OBBject[list[Data]]:
+    """Per-tool health snapshot since process start.
+
+    Args:
+      min_calls: Filter to tools that have been called at least this many
+                 times. Default 0 (include all observed tools).
+      errors_only: When True, only return tools with at least one error.
+
+    Returns one row per observed upstream_path with total calls, success
+    count, success rate, latest error code, last-latency_ms, last-success
+    and last-error timestamps, and an errors-by-code sub-dict.
+
+    Intended for ops: an external cron pings this endpoint every N seconds
+    and alerts on rows where success_rate drops below threshold or where
+    the last-error-at is newer than last-success-at for extended windows.
+    """
+    rows: list[Data] = []
+    with _HEALTH_LOCK:
+        for path, stats in sorted(_CALL_STATS.items()):
+            total = stats.get("total", 0)
+            if total < min_calls:
+                continue
+            errs = dict(stats.get("errors_by_code") or {})
+            if errors_only and not errs:
+                continue
+            success = stats.get("success", 0)
+            rows.append(Data(
+                tool=path,
+                total=total,
+                success=success,
+                error=total - success,
+                success_rate=round(success / total, 4) if total else None,
+                last_latency_ms=stats.get("last_latency_ms"),
+                last_error_code=stats.get("last_error_code"),
+                last_success_at=stats.get("last_success_at"),
+                last_error_at=stats.get("last_error_at"),
+                errors_by_code=errs,
+            ))
+    obb: OBBject[list[Data]] = OBBject(results=rows)
+    try:
+        obb.extra["observed_tool_count"] = len(_CALL_STATS)
+        obb.extra["note"] = (
+            "Stats are in-memory and reset on process restart. For persistent "
+            "monitoring run this on an external cron and pipe into your TSDB."
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return obb
+
+
+router.command(methods=["GET"])(sharkquant_flow_health)
