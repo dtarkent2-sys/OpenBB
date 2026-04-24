@@ -23,7 +23,7 @@ from typing import Optional
 from openbb_core.app.model.obbject import OBBject
 from openbb_core.provider.abstract.data import Data
 
-from openbb_sharkquant_flow.spot_price import get_spot
+from openbb_sharkquant_flow.spot_price import get_spot_with_source
 from openbb_sharkquant_flow.theta_client import theta_rows
 
 
@@ -77,17 +77,27 @@ def options_gex_dex(
             latest.get("open_interest") or latest.get("oi") or 0
         )
 
-    spot = get_spot(symbol)
+    spot, spot_source = get_spot_with_source(symbol)
     if spot is None:
-        return OBBject(
-            results=[
-                Data(
-                    symbol=symbol,
-                    expiration=expiration,
-                    error="spot_price_unavailable",
-                )
-            ]
-        )
+        obb: OBBject[list[Data]] = OBBject(results=[])
+        try:
+            obb.extra["error"] = {
+                "code": "spot_price_unavailable",
+                "message": (
+                    f"Could not resolve a spot price for '{symbol}' from any "
+                    "source (openbb_fmp loopback, alpha_vantage_global, "
+                    "alpha_vantage_bulk). GEX/DEX requires a live underlying "
+                    "price and cannot be computed without one."
+                ),
+                "hint": (
+                    "Verify ALPHAVANTAGE_API_KEY is set in the MCP server's "
+                    "environment, or that an openbb-api sibling with a valid "
+                    "FMP_API_KEY is reachable at http://localhost:$PORT."
+                ),
+            }
+        except Exception:  # noqa: BLE001
+            pass
+        return obb
 
     out: list[Data] = []
     total_call_gex = 0.0
@@ -134,6 +144,7 @@ def options_gex_dex(
                 gex=gex,
                 dex=dex,
                 spot=spot,
+                spot_source=spot_source,
             )
         )
 
@@ -150,6 +161,7 @@ def options_gex_dex(
             call_dex=total_call_dex,
             put_dex=total_put_dex,
             spot=spot,
+            spot_source=spot_source,
         )
     )
     return OBBject(results=out)
