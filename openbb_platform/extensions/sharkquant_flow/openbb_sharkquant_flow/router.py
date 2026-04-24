@@ -12,7 +12,9 @@ self-hosted Postgres cache, or a local dev instance.
 """
 # pylint: disable=import-outside-toplevel,unused-argument
 
+import inspect
 import os
+import textwrap
 from typing import Any, Callable, Optional
 
 from openbb_core.app.model.example import APIEx
@@ -305,126 +307,208 @@ def _resolve_apollo_product(product: str) -> Optional[str]:
 # Adding a new endpoint is one line here — widgets.json generation picks it up.
 # =============================================================================
 
+# Each endpoint spec is:
+#   (route_suffix, upstream_path, required_params, optional_params, description)
+# Params are grouped in a tuple; the typed factory turns them into a real
+# function signature with proper types pulled from _PARAM_TYPES. Sourced from
+# /openapi.json on analytics.openbb.superquant.com 2026-04-24.
+
 _EQUITY_FLOW = [
     ("equity_flow_daily", "equity_flow_table_daily",
-     "Daily institutional + retail equity flow (net buy/sell USD per ticker)."),
+     ("symbol",), ("start_date", "end_date", "columns"),
+     "Daily institutional + retail equity flow table (net buy/sell USD per ticker)."),
     ("equity_flow_1min", "equity_flow_table_1min",
+     ("symbol",), ("start_date", "end_date", "columns", "include_extended_hours"),
      "1-minute institutional + retail equity flow for a trading day."),
     ("flow_chart", "flow_chart",
-     "Equity flow chart time-series."),
+     (), ("symbol", "start_date", "end_date", "flow_method", "detrend_window",
+          "detrend_method", "zscore_window", "regression_method"),
+     "Daily equity flow chart time-series for a ticker."),
     ("flow_chart_intraday", "flow_chart_intraday",
-     "Intraday equity flow chart."),
+     (), ("symbol", "start_date", "end_date", "date", "flow_method", "interval",
+          "include_extended_hours", "zscore_window", "regression_method"),
+     "Intraday equity flow chart for a ticker."),
     ("sector_flow_chart", "sector_flow_chart",
-     "Aggregated equity flow by sector."),
+     (), ("index", "sector", "start_date", "end_date", "flow_method",
+          "detrend_window", "detrend_method", "zscore_window", "regression_method"),
+     "Aggregated equity flow by GICS sector."),
     ("etf_flow_chart", "etf_flow_chart",
+     (), ("sector", "start_date", "end_date", "flow_method", "detrend_window",
+          "detrend_method", "zscore_window", "regression_method"),
      "ETF flow chart time-series."),
-    ("flow_accuracy", "flow_accuracy",
-     "Flow-prediction accuracy table."),
+    ("flow_accuracy", "flow_accuracy", (), (),
+     "Flow-prediction accuracy table (global, no params)."),
     ("top_flow_daily", "top_flow_daily_events",
-     "Largest daily flow events across the universe."),
+     (), ("start_date", "end_date", "flow_method", "rank_by", "zscore_window",
+          "median_threshold"),
+     "Largest daily flow events across the universe, ranked by flow magnitude."),
     ("top_flow_cumulative", "top_flow_cumulative",
-     "Cumulative top-flow aggregates."),
+     (), ("start_date", "end_date", "flow_method"),
+     "Cumulative top-flow aggregates across the universe."),
 ]
 
 _SHORT_INTEREST = [
     ("short_interest_factor", "short_interest_factor_chart",
-     "Daily short-interest factor chart."),
+     ("symbol",),
+     ("start_date", "end_date", "flow_type", "lookback", "zscore_window"),
+     "Daily short-interest factor chart for a ticker."),
     ("short_interest_factor_intraday", "short_interest_factor_intraday",
-     "Intraday short-interest factor chart."),
+     ("symbol",),
+     ("start_date", "end_date", "date", "flow_type", "lookback", "interval",
+      "include_extended_hours", "zscore_window"),
+     "Intraday short-interest factor chart for a ticker."),
 ]
 
 _COT_FUTURES = [
     ("apollo_positioning", "apollo_positioning_dashboard",
-     "Apollo-vs-COT futures positioning dashboard."),
+     ("product",), (),
+     "Apollo-vs-COT futures positioning dashboard. `product` must be a canonical upstream label; aliases (ES, SPY, GC, …) are resolved automatically — see apollo_list_products."),
     ("apollo_positioning_extremes", "apollo_positioning_extremes",
-     "Apollo futures positioning extremes."),
+     ("product",), (),
+     "Apollo futures positioning extremes. Same product-alias rules as apollo_positioning."),
     ("cot_summary_disag", "cot_summary_disag_dashboard",
+     (), ("product", "product_name", "category", "report_type"),
      "CFTC COT disaggregated summary dashboard."),
     ("cot_detail_disag", "cot_detail_disag_dashboard",
+     (), ("product", "product_name", "category", "report_type"),
      "CFTC COT disaggregated detail dashboard."),
 ]
 
 _MACRO = [
     ("macro_surprises", "macro_surprises_dashboard",
-     "Macro surprise index dashboard."),
+     (), ("symbol", "identifier", "start_datetime", "end_datetime", "rounded",
+          "futures_symbols", "frequency"),
+     "Macro surprise index dashboard (Citi-surprise-index class)."),
     ("macro_predictions", "macro_predictions_dashboard",
-     "Macro predictions dashboard."),
+     (), ("symbol", "view", "start_datetime", "end_datetime", "overlays"),
+     "Macro predictions dashboard with optional overlay series."),
     ("macro_consensus", "macro_consensus_dashboard",
-     "Macro consensus dashboard."),
+     (), ("identifier", "symbol", "view", "start_datetime", "end_datetime",
+          "show_actual", "consensus_view"),
+     "Macro consensus dashboard comparing forecasts against actual prints."),
     ("macro_revisions", "macro_revisions_dashboard",
+     (), ("symbol", "identifier", "start_datetime", "end_datetime",
+          "show_residuals", "show_abs_residuals", "rounded", "show_all_buckets"),
      "Macro forecast revisions dashboard."),
 ]
 
 _PRICE = [
-    ("price_chart", "price_chart", "Daily price chart."),
-    ("price_chart_intraday", "price_chart_intraday", "Intraday price chart."),
+    ("price_chart", "price_chart", (),
+     ("symbol", "start_date", "end_date"),
+     "Daily price chart time-series."),
+    ("price_chart_intraday", "price_chart_intraday", (),
+     ("symbol", "start_date", "end_date", "date", "include_extended_hours"),
+     "Intraday price chart time-series."),
 ]
 
 _INELASTICITY = [
     ("market_inelasticity_summary", "market_inelasticity_summary",
-     "Market inelasticity summary."),
+     (), (),
+     "Market inelasticity summary (Koijen/Gabaix demand-system top-level view)."),
     ("market_inelasticity_timeseries", "market_inelasticity_timeseries",
-     "Market inelasticity time series."),
+     ("ticker",), ("metric",),
+     "Market inelasticity time-series for a single ticker."),
     ("market_inelasticity_scatter", "market_inelasticity_scatter",
-     "Market inelasticity scatter."),
+     ("ticker",), ("stage",),
+     "Market inelasticity scatter by stage (stage_1 / stage_2 / stage_3)."),
     ("market_inelasticity_cross_sectional", "market_inelasticity_cross_sectional",
-     "Market inelasticity cross-sectional."),
+     (), ("metric",),
+     "Market inelasticity cross-sectional snapshot across tickers."),
 ]
 
 _REFERENCE = [
-    ("security_master", "security_master", "Equity universe security master."),
+    ("security_master", "security_master",
+     ("symbol",), (),
+     "Equity universe security master row for a single symbol."),
 ]
 
-# Upstream uses an /api/ prefix for the options suite (the rest of the analytics
-# routes are bare), so options entries embed it in their upstream_path.
-# options_gex_dex is intentionally absent — it has a locally-computed handler
-# below that registers the same external path against Theta Terminal + FMP.
+# Options suite. Upstream uses an /api/ prefix — kept on the upstream_path side
+# so route_suffix stays bare (no /api/ in client-visible paths).
+# options_gex_dex is intentionally absent from this table — it has a locally
+# computed handler below against Theta Terminal + FMP (see handlers/).
+_OPTIONS_SNAPSHOT = ("symbol", "asof_date")  # both required
+_OPTIONS_STRIKE_BAND = ("model", "cp_filter", "strike_min", "strike_max")
+_OPTIONS_EXPIRATION_BAND = ("model", "cp_filter", "max_expiration_date")
+_OPTIONS_INTRADAY = ("model", "cp_filter", "freq")
+_OPTIONS_INTRADAY_BREAKDOWN = ("model", "cp_filter", "freq",
+                               "expiration_filter", "strike_filter")
+
 _OPTIONS = [
     ("options_cp_ratio", "api/options_cp_ratio",
-     "Options call/put ratio (per-strike or aggregate)."),
+     _OPTIONS_SNAPSHOT, _OPTIONS_STRIKE_BAND,
+     "Call/put ratio snapshot (per-strike or aggregate)."),
     ("options_cross_section", "api/options_cross_section",
-     "Per-strike options cross-section snapshot."),
+     _OPTIONS_SNAPSHOT, _OPTIONS_STRIKE_BAND,
+     "Per-strike options cross-section (OI, volume, IV, greeks) snapshot."),
     ("options_expiration_heatmap", "api/options_expiration_heatmap",
+     _OPTIONS_SNAPSHOT, _OPTIONS_EXPIRATION_BAND,
      "Open-interest / volume heatmap across strike × expiration."),
     ("options_greek_cross_section", "api/options_greek_cross_section",
+     _OPTIONS_SNAPSHOT, _OPTIONS_STRIKE_BAND,
      "Per-strike greeks (delta/gamma/vega/theta) cross-section."),
-    ("options_greek_exposure_by_expiration", "api/options_greek_exposure_by_expiration",
-     "Aggregated dealer greek exposure bucketed by expiration."),
+    ("options_greek_exposure_by_expiration",
+     "api/options_greek_exposure_by_expiration",
+     _OPTIONS_SNAPSHOT, _OPTIONS_EXPIRATION_BAND,
+     "Dealer greek exposure bucketed by expiration."),
     ("options_intraday_cum_premium", "api/options_intraday_cum_premium",
+     _OPTIONS_SNAPSHOT, _OPTIONS_INTRADAY,
      "Intraday cumulative premium (call-vs-put split)."),
-    ("options_intraday_cum_premium_breakdown", "api/options_intraday_cum_premium_breakdown",
+    ("options_intraday_cum_premium_breakdown",
+     "api/options_intraday_cum_premium_breakdown",
+     _OPTIONS_SNAPSHOT, _OPTIONS_INTRADAY_BREAKDOWN,
      "Intraday cumulative premium by expiration / strike bucket."),
     ("options_intraday_cumflow", "api/options_intraday_cumflow",
+     _OPTIONS_SNAPSHOT, _OPTIONS_INTRADAY,
      "Intraday cumulative options net flow."),
-    ("options_intraday_cumflow_breakdown", "api/options_intraday_cumflow_breakdown",
+    ("options_intraday_cumflow_breakdown",
+     "api/options_intraday_cumflow_breakdown",
+     _OPTIONS_SNAPSHOT, _OPTIONS_INTRADAY_BREAKDOWN,
      "Intraday cumulative net flow by expiration / strike bucket."),
     ("options_intraday_delta_flow", "api/options_intraday_delta_flow",
+     _OPTIONS_SNAPSHOT, _OPTIONS_INTRADAY,
      "Intraday delta-weighted options flow."),
-    ("options_intraday_delta_flow_breakdown", "api/options_intraday_delta_flow_breakdown",
+    ("options_intraday_delta_flow_breakdown",
+     "api/options_intraday_delta_flow_breakdown",
+     _OPTIONS_SNAPSHOT, _OPTIONS_INTRADAY_BREAKDOWN,
      "Intraday delta-weighted flow by expiration / strike bucket."),
     ("options_intraday_gamma_flow", "api/options_intraday_gamma_flow",
+     _OPTIONS_SNAPSHOT, _OPTIONS_INTRADAY,
      "Intraday gamma-weighted options flow."),
-    ("options_intraday_gamma_flow_breakdown", "api/options_intraday_gamma_flow_breakdown",
+    ("options_intraday_gamma_flow_breakdown",
+     "api/options_intraday_gamma_flow_breakdown",
+     _OPTIONS_SNAPSHOT, _OPTIONS_INTRADAY_BREAKDOWN,
      "Intraday gamma-weighted flow by expiration / strike bucket."),
     ("options_intraday_greek_flow", "api/options_intraday_greek_flow",
+     _OPTIONS_SNAPSHOT, _OPTIONS_INTRADAY,
      "Combined intraday greek-weighted flow series."),
     ("options_intraday_vega_flow", "api/options_intraday_vega_flow",
+     _OPTIONS_SNAPSHOT, _OPTIONS_INTRADAY,
      "Intraday vega-weighted options flow."),
-    ("options_intraday_vega_flow_breakdown", "api/options_intraday_vega_flow_breakdown",
+    ("options_intraday_vega_flow_breakdown",
+     "api/options_intraday_vega_flow_breakdown",
+     _OPTIONS_SNAPSHOT, _OPTIONS_INTRADAY_BREAKDOWN,
      "Intraday vega-weighted flow by expiration / strike bucket."),
     ("options_iv_smile", "api/options_iv_smile",
-     "Implied-volatility smile across strikes for an expiration."),
+     _OPTIONS_SNAPSHOT,
+     ("model", "cp_filter", "expiration", "strike_min", "strike_max"),
+     "Implied-volatility smile across strikes for one expiration."),
     ("options_kpi_metrics", "api/options_kpi_metrics",
-     "Headline options KPI metrics (gamma flip, max pain, etc.)."),
+     _OPTIONS_SNAPSHOT, _OPTIONS_STRIKE_BAND,
+     "Headline options KPI metrics (gamma flip, max pain, zero-gamma, etc.)."),
     ("options_net_flow_by_expiration", "api/options_net_flow_by_expiration",
+     _OPTIONS_SNAPSHOT, _OPTIONS_EXPIRATION_BAND,
      "Net options flow bucketed by expiration."),
     ("options_price_greeks", "api/options_price_greeks",
-     "Time-series of price + greeks for a single contract."),
+     _OPTIONS_SNAPSHOT, ("expiration", "strike", "cp_filter", "model"),
+     "Time-series of price + greeks for a single contract (symbol + expiration + strike)."),
     ("options_top_contracts", "api/options_top_contracts",
+     _OPTIONS_SNAPSHOT, _OPTIONS_STRIKE_BAND,
      "Top contracts by volume / OI / premium."),
     ("options_volume_by_expiration", "api/options_volume_by_expiration",
+     _OPTIONS_SNAPSHOT, _OPTIONS_EXPIRATION_BAND,
      "Options volume bucketed by expiration."),
     ("options_volume_by_strike", "api/options_volume_by_strike",
+     _OPTIONS_SNAPSHOT, _OPTIONS_STRIKE_BAND,
      "Options volume bucketed by strike."),
 ]
 
@@ -435,122 +519,245 @@ _ALL_ENDPOINTS = (
 
 
 # =============================================================================
-# Factory — every endpoint shares the same flexible query shape.
+# Typed proxy factory.
 #
-# These endpoints are wildly heterogeneous (symbol, product, sector, date
-# range, flow_method, interval, etc.) so rather than hand-write a typed
-# Pydantic model per upstream path, we accept the common union of params
-# and forward whatever the caller sent.
+# Each endpoint gets a handler with ONLY the params upstream actually accepts,
+# typed to real Python types, with a real docstring. Spec entries are
+# (suffix, path, required, optional, description) where required/optional are
+# iterables of parameter names; types come from _PARAM_TYPES. The factory
+# synthesizes a function whose __signature__ / __annotations__ match the
+# spec, so Router.command + FastAPI generate the correct openapi schema and
+# pydantic validates before we touch the upstream.
+#
+# This replaces the previous "28-param union passthrough" where every tool
+# advertised every param regardless of what its upstream needed — which
+# flooded the MCP tool-list with useless schema, forced agents to guess
+# which params mattered, and wasted tokens.
 # =============================================================================
 
 
-def _make_proxy(upstream_path: str, description: str) -> Callable:
-    """Build a handler closing over the upstream path."""
+# Parameter → (python_type, default, description). Sourced from
+# analytics.openbb.superquant.com's openapi + operational knowledge. Upstream
+# doesn't document enums for model/cp_filter/freq so they stay as str with
+# documented defaults; P1-follow-up is to probe each endpoint and promote to
+# Literal[...] once the valid set is confirmed per-endpoint.
+_PARAM_TYPES: dict[str, tuple[type, Any, str]] = {
+    # Common
+    "symbol": (str, None,
+               "Ticker / underlying (e.g. 'SPY', 'AAPL', 'NVDA')."),
+    "asof_date": (str, None,
+                  "Snapshot date, YYYY-MM-DD. Uses latest trading day when omitted."),
+    "start_date": (str, None, "Range start, YYYY-MM-DD."),
+    "end_date": (str, None, "Range end, YYYY-MM-DD."),
+    "date": (str, None, "Single intraday date, YYYY-MM-DD."),
+    # Options-specific
+    "model": (str, "m1",
+              "Internal model variant. Defaults to 'm1'. Valid: 'm1' (confirmed); other variants exist but aren't catalogued upstream — file a follow-up probe if you need them."),
+    "cp_filter": (str, "All",
+                  "Call/put filter. Defaults to 'All'. Common: 'All' | 'Call' | 'Put'."),
+    "freq": (str, None,
+             "Sampling frequency for intraday series. Common: '1min' | '5min' | '15min' | '1h'."),
+    "expiration": (str, None, "Option expiration, YYYY-MM-DD."),
+    "expiration_filter": (str, None,
+                          "Expiration bucket filter (upstream-defined string)."),
+    "strike": (float, None, "Strike price (for single-contract endpoints)."),
+    "strike_min": (float, None, "Lower bound strike filter."),
+    "strike_max": (float, None, "Upper bound strike filter."),
+    "strike_filter": (str, None,
+                      "Strike bucket filter (upstream-defined string)."),
+    "max_expiration_date": (str, None,
+                            "Only include expirations up to this date, YYYY-MM-DD."),
+    # Equity flow
+    "columns": (str, None, "Comma-separated column list to restrict output."),
+    "upper_threshold": (float, None, "Upper bound for flow-band shading."),
+    "lower_threshold": (float, None, "Lower bound for flow-band shading."),
+    "use_kalman_filter": (bool, None, "Apply Kalman smoothing to residuals."),
+    "add_buy_shade": (bool, None, "Shade buy-signal bands on the chart."),
+    "add_sell_shade": (bool, None, "Shade sell-signal bands on the chart."),
+    "residual_regression_window": (int, None,
+                                   "Rolling window size for residual regression."),
+    "detrend_regression_window": (int, None,
+                                  "Rolling window size for detrend regression."),
+    "flow_cols": (str, None, "Comma-separated flow columns to emit."),
+    "include_extended_hours": (bool, None,
+                               "Include 4am-8pm ET extended session bars."),
+    "flow_method": (str, None,
+                    "Flow construction method. Common: 'retail_vs_inst' | 'raw' | 'netted'."),
+    "detrend_window": (int, None, "Detrending rolling window size."),
+    "detrend_method": (str, None,
+                       "Detrending strategy. Common: 'rolling' | 'ewma' | 'none'."),
+    "zscore_window": (int, None, "Window for z-score normalization."),
+    "regression_method": (str, None,
+                          "Regression estimator. Common: 'ols' | 'kalman' | 'ridge'."),
+    "interval": (str, None,
+                 "Intraday bar interval. Common: '1min' | '5min' | '15min' | '1h'."),
+    "rank_by": (str, None,
+                "Event ranking metric. Common: 'flow_usd' | 'zscore' | 'abs_flow'."),
+    "median_threshold": (float, None,
+                         "Minimum median flow threshold for event inclusion."),
+    "sector": (str, None,
+               "Sector filter. Use the 11 GICS L1 names (e.g. 'Technology')."),
+    "index": (str, None,
+              "Parent index scope. Common: 'SP500' | 'Nasdaq100' | 'Russell3000'."),
+    # Short interest
+    "flow_type": (str, None,
+                  "Short-interest factor variant. Common: 'daily' | 'intraday_proxy'."),
+    "lookback": (int, None, "Rolling lookback window (trading days)."),
+    # Apollo / COT futures
+    "product": (str, None,
+                "Apollo product label. Accepts aliases (ES, SPY, GC, CL, ...) — see apollo_list_products for the full 133-value catalog."),
+    "product_name": (str, None,
+                     "Legacy COT product name (use when upstream rejects 'product')."),
+    "report_type": (str, None,
+                    "COT report variant. Common: 'disaggregated' | 'legacy' | 'tff'."),
+    "category": (str, None,
+                 "Trader category filter. Common: 'commercial' | 'managed_money' | 'non_reportable'."),
+    "identifier": (str, None, "Internal numeric identifier (upstream-scoped)."),
+    "signal": (str, None, "Signal sub-selection (upstream-scoped)."),
+    # Inelasticity
+    "ticker": (str, None, "Ticker symbol for inelasticity analysis."),
+    "metric": (str, None,
+               "Inelasticity metric. Common: 'r_squared' | 'alpha' | 'beta'."),
+    "stage": (str, None,
+              "Inelasticity stage. Common: 'stage_1' | 'stage_2' | 'stage_3'."),
+    # Macro
+    "view": (str, None,
+             "Macro view selector. Common: 'actual' | 'predicted' | 'surprise'."),
+    "start_datetime": (str, None, "Range start, ISO 8601."),
+    "end_datetime": (str, None, "Range end, ISO 8601."),
+    "show_actual": (bool, None, "Overlay actual release values on chart."),
+    "consensus_view": (str, None, "Consensus slicing. Common: 'mean' | 'median'."),
+    "overlays": (str, None, "Comma-separated overlay series names."),
+    "show_residuals": (bool, None, "Overlay prediction residuals."),
+    "show_abs_residuals": (bool, None, "Overlay absolute-value residuals."),
+    "rounded": (bool, None, "Round numeric outputs to 2 decimals."),
+    "show_all_buckets": (bool, None, "Include all histogram buckets."),
+    "futures_symbols": (str, None, "Comma-separated futures symbols to overlay."),
+    "frequency": (str, None, "Release frequency. Common: 'daily' | 'weekly' | 'monthly' | 'quarterly'."),
+}
 
-    def handler(
-        symbol: Optional[str] = None,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
-        asof_date: Optional[str] = None,
-        product: Optional[str] = None,
-        product_name: Optional[str] = None,
-        sector: Optional[str] = None,
-        index: Optional[str] = None,
-        interval: Optional[str] = None,
-        freq: Optional[str] = None,
-        flow_method: Optional[str] = None,
-        detrend_window: Optional[int] = None,
-        detrend_method: Optional[str] = None,
-        include_extended_hours: Optional[bool] = None,
-        report_type: Optional[str] = None,
-        lookback: Optional[int] = None,
-        category: Optional[str] = None,
-        identifier: Optional[str] = None,
-        signal: Optional[str] = None,
-        model: Optional[str] = None,
-        cp_filter: Optional[str] = None,
-        expiration: Optional[str] = None,
-        expiration_filter: Optional[str] = None,
-        strike: Optional[float] = None,
-        strike_min: Optional[float] = None,
-        strike_max: Optional[float] = None,
-        strike_filter: Optional[str] = None,
-        max_expiration_date: Optional[str] = None,
-    ) -> OBBject[list[Data]]:
-        """Auto-generated SuperQuant proxy."""
-        params = {
-            "symbol": symbol,
-            "start_date": start_date,
-            "end_date": end_date,
-            "asof_date": asof_date,
-            "product": product,
-            "product_name": product_name,
-            "sector": sector,
-            "index": index,
-            "interval": interval,
-            "freq": freq,
-            "flow_method": flow_method,
-            "detrend_window": detrend_window,
-            "detrend_method": detrend_method,
-            "include_extended_hours": include_extended_hours,
-            "report_type": report_type,
-            "lookback": lookback,
-            "category": category,
-            "identifier": identifier,
-            "signal": signal,
-            "model": model,
-            "cp_filter": cp_filter,
-            "expiration": expiration,
-            "expiration_filter": expiration_filter,
-            "strike": strike,
-            "strike_min": strike_min,
-            "strike_max": strike_max,
-            "strike_filter": strike_filter,
-            "max_expiration_date": max_expiration_date,
-        }
 
-        # Apollo positioning requires a canonical upstream product name like
-        # "CME E-MINI S&P 500 FUTURE" (133-value catalog). Resolve common
-        # aliases like "ES"/"SPY"/"SPX" to the canonical form before sending.
-        if upstream_path in ("apollo_positioning_dashboard",
-                             "apollo_positioning_extremes") and product:
+def _make_typed_proxy(
+    upstream_path: str,
+    required: tuple[str, ...],
+    optional: tuple[str, ...],
+    description: str,
+) -> Callable:
+    """Build a proxy handler with a signature that matches the upstream contract.
+
+    Uses exec() to synthesize a function because FastAPI/pydantic introspect
+    the actual signature + annotations to build openapi schemas. You can't
+    just set __signature__ at runtime — the schema generator walks the real
+    parameter names and defaults. Exec is fine here: the template is fixed
+    and the spec is under our control.
+    """
+    # Validate spec — every named param must have a type entry.
+    for p in (*required, *optional):
+        if p not in _PARAM_TYPES:
+            raise RuntimeError(
+                f"router spec for /{upstream_path}: param '{p}' has no _PARAM_TYPES entry"
+            )
+
+    # Build signature string. Required params come first (no default), then
+    # optional (each with its documented default which may be None).
+    sig_parts: list[str] = []
+    for p in required:
+        py_type, _default, _desc = _PARAM_TYPES[p]
+        sig_parts.append(f"{p}: {py_type.__name__}")
+    for p in optional:
+        py_type, default, _desc = _PARAM_TYPES[p]
+        if default is None:
+            sig_parts.append(f"{p}: Optional[{py_type.__name__}] = None")
+        elif isinstance(default, str):
+            sig_parts.append(f"{p}: {py_type.__name__} = {default!r}")
+        else:
+            sig_parts.append(f"{p}: {py_type.__name__} = {default!r}")
+    sig = ", ".join(sig_parts)
+
+    # Per-param docstring block
+    arg_docs = []
+    for p in (*required, *optional):
+        _pyt, _def, pdesc = _PARAM_TYPES[p]
+        arg_docs.append(f"        {p}: {pdesc}")
+    arg_doc_block = "\n".join(arg_docs) if arg_docs else "        (none)"
+
+    doc = (
+        f'"""{description}\n\n'
+        f'    Proxies GET {_DEFAULT_UPSTREAM}/{upstream_path}.\n'
+        f'    Upstream errors surface at extra.error with status/body/hint.\n\n'
+        f'    Args:\n{arg_doc_block}\n'
+        f'    """'
+    )
+
+    locals_list = ", ".join(f'"{p}": {p}' for p in (*required, *optional))
+    src = textwrap.dedent(f"""
+    def _handler({sig}) -> OBBject[list[Data]]:
+        {doc}
+        _params = {{{locals_list}}}
+        return _execute_proxy({upstream_path!r}, _params)
+    """)
+
+    ns: dict[str, Any] = {
+        "OBBject": OBBject,
+        "Data": Data,
+        "Optional": Optional,
+        "_execute_proxy": _execute_proxy,
+    }
+    exec(src, ns)  # noqa: S102 — trusted template, no user input
+    fn = ns["_handler"]
+    fn.__name__ = f"sharkquant_flow_{upstream_path.replace('/', '_').lstrip('_')}"
+    return fn
+
+
+def _execute_proxy(upstream_path: str, params: dict) -> OBBject[list[Data]]:
+    """Shared runtime body: apollo-alias resolution, upstream call, error wrap."""
+    # Apollo positioning requires a canonical upstream product label; resolve
+    # common aliases (ES/SPY/GC/...) before forwarding. Unknown inputs still
+    # pass through so exotic markets remain reachable.
+    if upstream_path in ("apollo_positioning_dashboard",
+                         "apollo_positioning_extremes"):
+        product = params.get("product")
+        if product:
             resolved = _resolve_apollo_product(product)
             if resolved is None:
-                err = UpstreamError(
+                return _error_obbject(UpstreamError(
                     code="unknown_apollo_product",
                     message=f"'{product}' is not a recognized apollo product.",
                     hint=(
-                        "Call /api/v1/sharkquant_flow/apollo_list_products to see the "
-                        "full catalog (133 entries), or pass one of the common aliases: "
-                        "ES, SPY, SPX, NQ, QQQ, YM, RTY, CL, NG, GC, SI, HG, ZC, ZS, "
-                        "ZW, 10Y, 2Y, 5Y, 30Y, EUR, GBP, JPY, BTC, ETH."
+                        "Call apollo_list_products to see the 133-value catalog. "
+                        "Accepted aliases include: ES, SPY, SPX, NQ, QQQ, YM, RTY, "
+                        "CL, NG, GC, SI, HG, ZC, ZS, ZW, 10Y, 2Y, 5Y, 30Y, EUR, "
+                        "GBP, JPY, BTC, ETH."
                     ),
-                )
-                return _error_obbject(err)
+                ))
             params["product"] = resolved
 
-        try:
-            payload = _call_upstream(upstream_path, params)
-        except UpstreamError as err:
-            return _error_obbject(err)
-        return OBBject(results=_to_data(payload))
-
-    handler.__name__ = f"sharkquant_flow_{upstream_path}"
-    handler.__doc__ = (
-        f"{description}\n\nProxies GET {_DEFAULT_UPSTREAM}/{upstream_path}. "
-        "Pass upstream query params as-is — unused ones are dropped. "
-        "Upstream errors surface at the top-level `extra.error` field with "
-        "status, URL, body, and a remediation hint."
-    )
-    return handler
+    try:
+        payload = _call_upstream(upstream_path, params)
+    except UpstreamError as err:
+        return _error_obbject(err)
+    return OBBject(results=_to_data(payload))
 
 
-for route_suffix, upstream_path, description in _ALL_ENDPOINTS:
-    handler = _make_proxy(upstream_path, description)
+for route_suffix, upstream_path, required, optional, description in _ALL_ENDPOINTS:
+    handler = _make_typed_proxy(upstream_path, required, optional, description)
     handler.__name__ = route_suffix  # route path = function name under @router.command
+    # Build a realistic example — if upstream requires symbol+asof_date we
+    # supply both so the openapi example actually validates.
+    example_params = {}
+    if "symbol" in required:
+        example_params["symbol"] = "SPY"
+    if "asof_date" in required:
+        example_params["asof_date"] = "2026-04-23"
+    if "ticker" in required:
+        example_params["ticker"] = "AAPL"
+    if "product" in required:
+        example_params["product"] = "ES"
+    if not example_params:
+        example_params["symbol"] = "AAPL"
     router.command(
         methods=["GET"],
-        examples=[APIEx(parameters={"symbol": "AAPL"})],
+        examples=[APIEx(parameters=example_params)],
     )(handler)
 
 
