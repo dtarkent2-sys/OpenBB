@@ -845,6 +845,11 @@ def _make_typed_proxy(
     exec(src, ns)  # noqa: S102 — trusted template, no user input
     fn = ns["_handler"]
     fn.__name__ = f"sharkquant_flow_{upstream_path.replace('/', '_').lstrip('_')}"
+    # OpenBB's Router.command() computes operation_id from func.__module__.split('.')
+    # + func.__name__. Functions built via exec() inherit no __module__, so
+    # set it explicitly to this module — otherwise router.command raises
+    # AttributeError: 'NoneType' has no 'split'.
+    fn.__module__ = __name__
     # Stash the schema on the function for later introspection (e.g. by the
     # P2 catalog meta-tools) without having to re-derive from __annotations__.
     fn.__sq_input_schema__ = schema
