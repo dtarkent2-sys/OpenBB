@@ -165,20 +165,87 @@ def _to_data(payload: Any) -> list[Data]:
     return [Data(value=payload)]
 
 
-def _error_obbject(err: UpstreamError) -> OBBject[list[Data]]:
+def _error_obbject(
+    err: UpstreamError,
+    schema: Optional[dict] = None,
+) -> OBBject[list[Data]]:
     """Pack an UpstreamError into an OBBject whose top-level error field is
     visible to MCP clients and whose results is an empty list, not a row
     with an error string hiding inside it.
+
+    When `schema` is supplied AND the error looks like a validation failure
+    (upstream 422, unknown-apollo-product, or upstream_application_error),
+    the input schema is echoed on the error dict so callers can self-correct
+    in one round-trip instead of having to fetch /openapi.json separately.
+    This implements P3 from the MCP refactor work order.
     """
     obb: OBBject[list[Data]] = OBBject(results=[])
-    # OBBject has an `extra` dict reserved for metadata — put the full
-    # error there, AND raise it as a warning so any client that ignores
-    # `extra` still sees something went wrong.
+    err_dict = err.as_dict()
+    if schema is not None and _is_validation_error(err):
+        err_dict["schema"] = schema
+        # Nudge the caller toward the self-correct path.
+        if not err_dict.get("hint"):
+            err_dict["hint"] = (
+                "Retry the call with arguments matching the `schema` field above. "
+                "Required parameters are listed under `schema.required`."
+            )
     try:
-        obb.extra["error"] = err.as_dict()
+        obb.extra["error"] = err_dict
     except Exception:  # noqa: BLE001
         pass
     return obb
+
+
+def _is_validation_error(err: UpstreamError) -> bool:
+    """True when the error is caused by bad/missing/unknown arguments,
+    not by network failure or true upstream-internal error.
+
+    Schema-echo only makes sense for validation-class errors — echoing
+    the schema on a DNS failure wastes tokens without helping the caller.
+    """
+    if err.code in (
+        "unknown_apollo_product",
+        "upstream_application_error",
+    ):
+        return True
+    if err.code == "upstream_http_error" and err.upstream_status in (400, 422):
+        return True
+    return False
+
+
+def _build_schema(
+    required: tuple[str, ...],
+    optional: tuple[str, ...],
+) -> dict:
+    """Build a JSON Schema describing a tool's inputs from its param tuples.
+
+    Mirrors what FastAPI/pydantic already expose via /openapi.json, but the
+    MCP protocol doesn't give callers easy access to that doc from inside
+    an error response. So we build a compact inline version here and attach
+    it to errors where the caller needs to self-correct.
+
+    Types come from _PARAM_TYPES; defaults and descriptions flow through.
+    """
+    properties: dict[str, dict] = {}
+    for p in (*required, *optional):
+        py_type, default, desc = _PARAM_TYPES[p]
+        type_name = {
+            str: "string",
+            int: "integer",
+            float: "number",
+            bool: "boolean",
+        }.get(py_type, "string")
+        prop: dict = {"type": type_name, "description": desc}
+        if default is not None:
+            prop["default"] = default
+        properties[p] = prop
+    schema: dict = {
+        "type": "object",
+        "properties": properties,
+    }
+    if required:
+        schema["required"] = list(required)
+    return schema
 
 
 # =============================================================================
@@ -689,12 +756,16 @@ def _make_typed_proxy(
         f'    """'
     )
 
+    # Pre-build the input schema once. Closure captures it so _execute_proxy
+    # can echo it on validation-class errors without rebuilding per-call.
+    schema = _build_schema(required, optional)
+
     locals_list = ", ".join(f'"{p}": {p}' for p in (*required, *optional))
     src = textwrap.dedent(f"""
     def _handler({sig}) -> OBBject[list[Data]]:
         {doc}
         _params = {{{locals_list}}}
-        return _execute_proxy({upstream_path!r}, _params)
+        return _execute_proxy({upstream_path!r}, _params, _schema)
     """)
 
     ns: dict[str, Any] = {
@@ -702,15 +773,29 @@ def _make_typed_proxy(
         "Data": Data,
         "Optional": Optional,
         "_execute_proxy": _execute_proxy,
+        "_schema": schema,
     }
     exec(src, ns)  # noqa: S102 — trusted template, no user input
     fn = ns["_handler"]
     fn.__name__ = f"sharkquant_flow_{upstream_path.replace('/', '_').lstrip('_')}"
+    # Stash the schema on the function for later introspection (e.g. by the
+    # P2 catalog meta-tools) without having to re-derive from __annotations__.
+    fn.__sq_input_schema__ = schema
     return fn
 
 
-def _execute_proxy(upstream_path: str, params: dict) -> OBBject[list[Data]]:
-    """Shared runtime body: apollo-alias resolution, upstream call, error wrap."""
+def _execute_proxy(
+    upstream_path: str,
+    params: dict,
+    schema: Optional[dict] = None,
+) -> OBBject[list[Data]]:
+    """Shared runtime body: apollo-alias resolution, upstream call, error wrap.
+
+    When `schema` is supplied, validation-class errors (upstream 422,
+    unknown-apollo-product, upstream application errors) include the input
+    schema in their error response so the caller can self-correct without
+    a second round-trip to /openapi.json.
+    """
     # Apollo positioning requires a canonical upstream product label; resolve
     # common aliases (ES/SPY/GC/...) before forwarding. Unknown inputs still
     # pass through so exotic markets remain reachable.
@@ -720,22 +805,25 @@ def _execute_proxy(upstream_path: str, params: dict) -> OBBject[list[Data]]:
         if product:
             resolved = _resolve_apollo_product(product)
             if resolved is None:
-                return _error_obbject(UpstreamError(
-                    code="unknown_apollo_product",
-                    message=f"'{product}' is not a recognized apollo product.",
-                    hint=(
-                        "Call apollo_list_products to see the 133-value catalog. "
-                        "Accepted aliases include: ES, SPY, SPX, NQ, QQQ, YM, RTY, "
-                        "CL, NG, GC, SI, HG, ZC, ZS, ZW, 10Y, 2Y, 5Y, 30Y, EUR, "
-                        "GBP, JPY, BTC, ETH."
+                return _error_obbject(
+                    UpstreamError(
+                        code="unknown_apollo_product",
+                        message=f"'{product}' is not a recognized apollo product.",
+                        hint=(
+                            "Call apollo_list_products to see the 133-value catalog. "
+                            "Accepted aliases include: ES, SPY, SPX, NQ, QQQ, YM, "
+                            "RTY, CL, NG, GC, SI, HG, ZC, ZS, ZW, 10Y, 2Y, 5Y, 30Y, "
+                            "EUR, GBP, JPY, BTC, ETH."
+                        ),
                     ),
-                ))
+                    schema=schema,
+                )
             params["product"] = resolved
 
     try:
         payload = _call_upstream(upstream_path, params)
     except UpstreamError as err:
-        return _error_obbject(err)
+        return _error_obbject(err, schema=schema)
     return OBBject(results=_to_data(payload))
 
 
