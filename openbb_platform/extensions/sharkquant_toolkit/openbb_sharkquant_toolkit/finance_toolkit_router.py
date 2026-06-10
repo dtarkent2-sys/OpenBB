@@ -8,8 +8,8 @@ performance/risk/technicals becomes an endpoint under
 `/api/v1/finance_toolkit/{family}_{method_suffix}`.
 
 Every endpoint shares the signature (symbol, start_date, end_date),
-builds a stateless `Toolkit` backed by `FMP_API_KEY`, and returns a
-`list[Data]` normalized from whatever shape FT emits.
+builds a `Toolkit` fed by Alpha Vantage datasets (`ALPHAVANTAGE_API_KEY`),
+and returns a `list[Data]` normalized from whatever shape FT emits.
 """
 # pylint: disable=import-outside-toplevel,unused-argument
 
@@ -20,6 +20,7 @@ from openbb_core.app.model.obbject import OBBject
 from openbb_core.app.router import Router
 from openbb_core.provider.abstract.data import Data
 
+from openbb_sharkquant_toolkit.av_datasets import AlphaVantageError
 from openbb_sharkquant_toolkit.helpers import (
     build_toolkit,
     df_to_data,
@@ -219,6 +220,42 @@ def _route_name(family: str, method_name: str) -> str:
     return f"{family}_{suffix}".lower()
 
 
+_FUNDAMENTALS_FAMILIES = ("ratios", "models")
+
+
+def _failure_warning(exc: Exception, family: str, symbol: str, meta: dict) -> dict:
+    """Translate a FinanceToolkit/provider failure into an actionable warning.
+
+    Distinguishes provider quota/availability problems (Alpha Vantage) from
+    FinanceToolkit's generic "datasets could not be populated" errors.
+    """
+    if isinstance(exc, AlphaVantageError):
+        return {"category": "AlphaVantageError", "message": str(exc)}
+
+    missing = meta.get("fundamentals_missing") or []
+    if family in _FUNDAMENTALS_FAMILIES and missing:
+        return {
+            "category": "ProviderDataError",
+            "message": (
+                f"Alpha Vantage has no fundamental statements for "
+                f"{', '.join(missing)} (typical for ETFs, funds, and most "
+                f"non-US listings). The `{family}` endpoints require income/"
+                "balance/cash-flow statements; try an individual equity "
+                f"symbol instead. Underlying error: {exc}"
+            ),
+        }
+
+    message = str(exc)
+    if "could not be populated" in message:
+        message = (
+            f"FinanceToolkit could not populate datasets for {symbol}: "
+            "the data provider (Alpha Vantage) returned no usable statements "
+            "or prices. This usually means the symbol is not a listed equity "
+            f"or provider data is unavailable. Underlying error: {exc}"
+        )
+    return {"category": "FinanceToolkit", "message": message}
+
+
 def _make_endpoint(
     family: str,
     attr_name: str,
@@ -233,23 +270,26 @@ def _make_endpoint(
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
     ) -> OBBject[list[Data]]:
-        t = build_toolkit(
-            symbol,
-            start_date=start_date,
-            end_date=end_date,
-            quarterly=quarterly,
-        )
-        sub = getattr(t, attr_name)
-        fn = getattr(sub, method_name)
+        meta: dict = {}
         try:
+            t = build_toolkit(
+                symbol,
+                start_date=start_date,
+                end_date=end_date,
+                quarterly=quarterly,
+            )
+            meta = getattr(t, "_sq_av_meta", {}) or {}
+            # Accessing the family property (t.ratios / t.models / ...) is
+            # what triggers dataset population inside FinanceToolkit, so it
+            # must live inside this try block — failures here used to leak
+            # out as opaque 500s instead of the graceful 200-with-warnings.
+            sub = getattr(t, attr_name)
+            fn = getattr(sub, method_name)
             result = fn()
         except Exception as exc:  # pragma: no cover
-            # FT occasionally raises KeyError/ValueError when the symbol has
-            # incomplete statements. Surface a typed empty result so the
-            # endpoint stays a 200, not a 500.
             return OBBject(
                 results=[],
-                warnings=[{"category": "FinanceToolkit", "message": str(exc)}],
+                warnings=[_failure_warning(exc, family, symbol, meta)],
             )
 
         # Performance/risk commonly return scalars or per-symbol Series;
@@ -323,8 +363,10 @@ def models_intrinsic_valuation(
     defaults are applied (5% near-term, 2.5% perpetual, 8% WACC, 5-year
     projection from FCF). Override via query params for symbol-specific runs.
     """
-    t = build_toolkit(symbol, start_date=start_date, end_date=end_date)
+    meta: dict = {}
     try:
+        t = build_toolkit(symbol, start_date=start_date, end_date=end_date)
+        meta = getattr(t, "_sq_av_meta", {}) or {}
         df = t.models.get_intrinsic_valuation(
             growth_rate=growth_rate,
             perpetual_growth_rate=perpetual_growth_rate,
@@ -335,7 +377,7 @@ def models_intrinsic_valuation(
     except Exception as exc:
         return OBBject(
             results=[],
-            warnings=[{"category": "FinanceToolkit", "message": str(exc)}],
+            warnings=[_failure_warning(exc, "models", symbol, meta)],
         )
     return OBBject(results=df_to_data(df))
 
@@ -359,8 +401,10 @@ def models_gorden_growth_model(
     return, 3% growth, 5 projection periods) applied so the endpoint
     returns a result out-of-the-box; override for symbol-specific runs.
     """
-    t = build_toolkit(symbol, start_date=start_date, end_date=end_date)
+    meta: dict = {}
     try:
+        t = build_toolkit(symbol, start_date=start_date, end_date=end_date)
+        meta = getattr(t, "_sq_av_meta", {}) or {}
         df = t.models.get_gorden_growth_model(
             rate_of_return=rate_of_return,
             growth_rate=growth_rate,
@@ -369,6 +413,6 @@ def models_gorden_growth_model(
     except Exception as exc:
         return OBBject(
             results=[],
-            warnings=[{"category": "FinanceToolkit", "message": str(exc)}],
+            warnings=[_failure_warning(exc, "models", symbol, meta)],
         )
     return OBBject(results=df_to_data(df))
