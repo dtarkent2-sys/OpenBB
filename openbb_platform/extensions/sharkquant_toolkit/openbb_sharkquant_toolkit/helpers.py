@@ -1,29 +1,27 @@
 """Shared helpers for the finance_toolkit extension.
 
-A single Toolkit is built per request (no cross-request caching) so
-requests stay independent and the OpenBB API stays stateless. Callers
-pass symbols + date window; we return DataFrames as list[Data] for
-OpenBB's serialization.
+A Toolkit is built per request, but the underlying Alpha Vantage datasets
+are served from an in-process TTL cache (see `av_datasets`), so one
+symbol's statements/prices are fetched once — not once per endpoint.
+Callers pass symbols + date window; we return DataFrames as list[Data]
+for OpenBB's serialization.
+
+FinanceToolkit is fed through its external/custom dataset interface
+(`Toolkit(balance=..., income=..., cash=..., historical=...)`) — no FMP
+key is required anymore.
 """
 from __future__ import annotations
 
 import datetime as _dt
 import math
-import os
 from typing import Any, Optional
 
 from openbb_core.provider.abstract.data import Data
 
-
-def get_fmp_api_key() -> str:
-    """Return the FMP key from env. Raise if missing — FinanceToolkit
-    can't do anything without it."""
-    key = os.environ.get("FMP_API_KEY", "").strip()
-    if not key:
-        raise RuntimeError(
-            "FinanceToolkit endpoints require FMP_API_KEY in the environment."
-        )
-    return key
+from openbb_sharkquant_toolkit.av_datasets import (
+    TREASURY_NAME,
+    get_av_datasets,
+)
 
 
 def default_start_date() -> str:
@@ -37,8 +35,13 @@ def build_toolkit(
     end_date: Optional[str] = None,
     quarterly: bool = True,
 ):
-    """Construct a FinanceToolkit Toolkit backed by FMP."""
-    # pylint: disable=import-outside-toplevel
+    """Construct a FinanceToolkit Toolkit fed by Alpha Vantage datasets.
+
+    The returned Toolkit carries a `_sq_av_meta` dict describing any
+    degradations (tickers without fundamentals, missing risk-free data),
+    which the router uses to produce actionable error messages.
+    """
+    # pylint: disable=import-outside-toplevel,protected-access
     from financetoolkit import Toolkit
 
     if isinstance(symbols, str):
@@ -48,15 +51,48 @@ def build_toolkit(
     if not tickers:
         raise ValueError("No symbols provided")
 
-    return Toolkit(
+    start = start_date or default_start_date()
+    datasets = get_av_datasets(
+        tickers,
+        quarterly=quarterly,
+        start_date=start,
+        end_date=end_date,
+    )
+
+    has_benchmark = "Benchmark" in datasets["historical"].columns.get_level_values(1)
+
+    toolkit = Toolkit(
         tickers=tickers,
-        api_key=get_fmp_api_key(),
-        start_date=start_date or default_start_date(),
+        start_date=start,
         end_date=end_date,
         quarterly=quarterly,
-        enforce_source="FinancialModelingPrep",
+        historical=datasets["historical"],
+        balance=datasets["balance"],
+        income=datasets["income"],
+        cash=datasets["cash"],
+        # Custom datasets are already in USD-consistent shape; skip currency
+        # conversion and the FMP plan probe (sleep_timer=None would ping FMP).
+        convert_currency=False,
+        sleep_timer=False,
+        reverse_dates=False,
+        benchmark_ticker="SPY" if has_benchmark else None,
         progress_bar=False,
     )
+
+    # Inject the Alpha Vantage 10y treasury data so FinanceToolkit never
+    # reaches out to FMP/Yahoo for the risk-free rate. The weekly/monthly/
+    # quarterly/yearly variants are derived from the daily frame by FT.
+    if datasets["treasury"] is not None:
+        toolkit._daily_treasury_data = datasets["treasury"]
+        toolkit._daily_risk_free_rate = datasets["treasury"].xs(
+            TREASURY_NAME, level=1, axis=1
+        )
+
+    toolkit._sq_av_meta = {
+        "fundamentals_missing": datasets["fundamentals_missing"],
+        "notes": datasets["notes"],
+    }
+    return toolkit
 
 
 def _safe(v: Any) -> Any:

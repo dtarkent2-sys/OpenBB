@@ -13,6 +13,20 @@ as OpenBB Platform endpoints under `/api/v1/finance_toolkit/*`.
 
 ## Environment
 
-Set `FMP_API_KEY` so FinanceToolkit can pull statements/prices from FMP.
-Data is cached per-Toolkit-instance; each request builds a fresh
-instance so requests are independent.
+Set `ALPHAVANTAGE_API_KEY`. FinanceToolkit is fed through its external
+dataset interface from Alpha Vantage (INCOME_STATEMENT, BALANCE_SHEET,
+CASH_FLOW, TIME_SERIES_DAILY_ADJUSTED, TREASURY_YIELD) — no FMP key is
+required. Raw Alpha Vantage payloads are cached in-process for ~6 hours,
+so one symbol's statements are fetched once, not once per endpoint.
+
+### Known data approximations (Alpha Vantage vs FMP)
+
+- Weighted Average Shares (basic + diluted) are approximated with
+  period-end `commonStockSharesOutstanding`; EPS is derived from it.
+- "Accounts Receivable" is filled with net receivables.
+- Rows with no Alpha Vantage source stay NaN (prepaids, tax assets and
+  payables, accrued expenses, minority interest, additional paid-in
+  capital, stock-based compensation, working-capital change breakdowns,
+  acquisitions, investment purchases/sales, debt repayment, cash at
+  beginning/end of period, income taxes paid, interest paid). Metrics
+  that depend solely on those rows return NaN values.
