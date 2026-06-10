@@ -55,6 +55,9 @@ from openbb_mcp_server.models.settings import MCPSettings
 from openbb_mcp_server.models.tools import CategoryInfo, SubcategoryInfo, ToolInfo
 from openbb_mcp_server.service.mcp_service import MCPService
 from openbb_mcp_server.utils.app_import import parse_args
+from openbb_mcp_server.utils.empty_response_patch import (
+    patch_openapi_tool_empty_responses,
+)
 from openbb_mcp_server.utils.fastapi import (
     get_api_prefix,
     process_fastapi_routes_for_mcp,
@@ -369,6 +372,11 @@ def create_mcp_server(
     FastMCP
         The configured FastMCP server instance.
     """
+    # OpenBB converts EmptyDataError into a bodyless 204; make sure such
+    # responses come back as structured empty results instead of MCP SDK
+    # "outputSchema defined but no structured output returned" errors.
+    patch_openapi_tool_empty_responses()
+
     auth_provider = None
     if auth and isinstance(auth, list | tuple) and len(auth) == 2 and all(auth):
         # pylint: disable=import-outside-toplevel
