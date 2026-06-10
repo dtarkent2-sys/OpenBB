@@ -223,37 +223,48 @@ def _route_name(family: str, method_name: str) -> str:
 _FUNDAMENTALS_FAMILIES = ("ratios", "models")
 
 
-def _failure_warning(exc: Exception, family: str, symbol: str, meta: dict) -> dict:
-    """Translate a FinanceToolkit/provider failure into an actionable warning.
+def _failure_warnings(
+    exc: Exception, family: str, symbol: str, meta: dict
+) -> list[dict]:
+    """Translate a FinanceToolkit/provider failure into actionable warnings.
 
     Distinguishes provider quota/availability problems (Alpha Vantage) from
-    FinanceToolkit's generic "datasets could not be populated" errors.
+    FinanceToolkit's generic "datasets could not be populated" errors, and
+    surfaces any dataset degradation notes recorded while building the
+    Toolkit (`meta["notes"]`) as additional warnings so they actually reach
+    API users — as promised by `helpers.build_toolkit`.
     """
     if isinstance(exc, AlphaVantageError):
-        return {"category": "AlphaVantageError", "message": str(exc)}
+        primary = {"category": "AlphaVantageError", "message": str(exc)}
+    else:
+        missing = meta.get("fundamentals_missing") or []
+        if family in _FUNDAMENTALS_FAMILIES and missing:
+            primary = {
+                "category": "ProviderDataError",
+                "message": (
+                    f"Alpha Vantage has no fundamental statements for "
+                    f"{', '.join(missing)} (typical for ETFs, funds, and most "
+                    f"non-US listings). The `{family}` endpoints require income/"
+                    "balance/cash-flow statements; try an individual equity "
+                    f"symbol instead. Underlying error: {exc}"
+                ),
+            }
+        else:
+            message = str(exc)
+            if "could not be populated" in message:
+                message = (
+                    f"FinanceToolkit could not populate datasets for {symbol}: "
+                    "the data provider (Alpha Vantage) returned no usable "
+                    "statements or prices. This usually means the symbol is "
+                    "not a listed equity or provider data is unavailable. "
+                    f"Underlying error: {exc}"
+                )
+            primary = {"category": "FinanceToolkit", "message": message}
 
-    missing = meta.get("fundamentals_missing") or []
-    if family in _FUNDAMENTALS_FAMILIES and missing:
-        return {
-            "category": "ProviderDataError",
-            "message": (
-                f"Alpha Vantage has no fundamental statements for "
-                f"{', '.join(missing)} (typical for ETFs, funds, and most "
-                f"non-US listings). The `{family}` endpoints require income/"
-                "balance/cash-flow statements; try an individual equity "
-                f"symbol instead. Underlying error: {exc}"
-            ),
-        }
-
-    message = str(exc)
-    if "could not be populated" in message:
-        message = (
-            f"FinanceToolkit could not populate datasets for {symbol}: "
-            "the data provider (Alpha Vantage) returned no usable statements "
-            "or prices. This usually means the symbol is not a listed equity "
-            f"or provider data is unavailable. Underlying error: {exc}"
-        )
-    return {"category": "FinanceToolkit", "message": message}
+    return [primary] + [
+        {"category": "DataDegradation", "message": str(note)}
+        for note in (meta.get("notes") or [])
+    ]
 
 
 def _make_endpoint(
@@ -289,7 +300,7 @@ def _make_endpoint(
         except Exception as exc:  # pragma: no cover
             return OBBject(
                 results=[],
-                warnings=[_failure_warning(exc, family, symbol, meta)],
+                warnings=_failure_warnings(exc, family, symbol, meta),
             )
 
         # Performance/risk commonly return scalars or per-symbol Series;
@@ -377,7 +388,7 @@ def models_intrinsic_valuation(
     except Exception as exc:
         return OBBject(
             results=[],
-            warnings=[_failure_warning(exc, "models", symbol, meta)],
+            warnings=_failure_warnings(exc, "models", symbol, meta),
         )
     return OBBject(results=df_to_data(df))
 
@@ -413,6 +424,6 @@ def models_gorden_growth_model(
     except Exception as exc:
         return OBBject(
             results=[],
-            warnings=[_failure_warning(exc, "models", symbol, meta)],
+            warnings=_failure_warnings(exc, "models", symbol, meta),
         )
     return OBBject(results=df_to_data(df))

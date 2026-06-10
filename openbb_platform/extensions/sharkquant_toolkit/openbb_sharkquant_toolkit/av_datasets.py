@@ -574,6 +574,13 @@ def _build_price_frame(symbol: str, start_date: str, end_date: Optional[str], rf
         aligned_rf = rf.reindex(frame.index).ffill()
         frame["Excess Return"] = frame["Return"].sub(aligned_rf)
         frame["Excess Volatility"] = frame["Excess Return"].std()
+    else:
+        # No risk-free rate: keep the full FT column contract anyway.
+        # Omitting these columns makes FinanceToolkit fall back to its own
+        # internal FMP/Yahoo fetch paths to fill the gap; NaN columns keep
+        # everything in-process (excess-return metrics degrade to NaN).
+        frame["Excess Return"] = _NAN
+        frame["Excess Volatility"] = _NAN
     adjusted_return = frame["Return"].copy()
     if len(adjusted_return):
         adjusted_return.iloc[0] = 0.0
@@ -619,6 +626,11 @@ def _build_treasury_frame(start_date: str, end_date: Optional[str]):
     )
     frame["Return"] = frame["Adj Close"].ffill().pct_change()
     frame["Volatility"] = frame["Return"].std()
+    # Excess return over itself is meaningless for the risk-free series, but
+    # the columns must exist to honor the "same shape as historical" contract
+    # (see module docstring) so FinanceToolkit never re-fetches externally.
+    frame["Excess Return"] = _NAN
+    frame["Excess Volatility"] = _NAN
     adjusted_return = frame["Return"].copy()
     if len(adjusted_return):
         adjusted_return.iloc[0] = 0.0
@@ -631,6 +643,26 @@ def _build_treasury_frame(start_date: str, end_date: Optional[str]):
 # =============================================================================
 # Public entry point
 # =============================================================================
+
+
+def _copy_bundle(bundle: dict) -> dict:
+    """Per-caller view of a (cached) bundle.
+
+    DataFrames *and* lists (`notes`, `fundamentals_missing`) are copied so
+    one Toolkit's mutations can never leak into the shared cache entry or
+    into other Toolkits built from the same cache hit.
+    """
+    # pylint: disable=import-outside-toplevel
+    import pandas as pd
+
+    return {
+        name: (
+            value.copy()
+            if isinstance(value, pd.DataFrame)
+            else list(value) if isinstance(value, list) else value
+        )
+        for name, value in bundle.items()
+    }
 
 
 def get_av_datasets(
@@ -657,10 +689,7 @@ def get_av_datasets(
     key = ("bundle", tuple(tickers), quarterly, start_date, end_date, include_benchmark)
     cached = _cache_get(key)
     if cached is not None:
-        return {
-            name: (value.copy() if isinstance(value, pd.DataFrame) else value)
-            for name, value in cached.items()
-        }
+        return _copy_bundle(cached)
 
     notes: list[str] = []
 
@@ -674,6 +703,11 @@ def get_av_datasets(
         notes.append(
             f"Risk-free rate unavailable ({exc}); excess-return based metrics "
             "(e.g. Sharpe ratio) will be degraded."
+        )
+        notes.append(
+            "'Excess Return' and 'Excess Volatility' columns are NaN-filled "
+            "(risk-free rate unavailable) so FinanceToolkit does not fall "
+            "back to external FMP/Yahoo fetches."
         )
 
     # --- prices (mandatory for the requested tickers) ------------------------
@@ -730,7 +764,4 @@ def get_av_datasets(
         "notes": notes,
     }
     _cache_set(key, bundle)
-    return {
-        name: (value.copy() if isinstance(value, pd.DataFrame) else value)
-        for name, value in bundle.items()
-    }
+    return _copy_bundle(bundle)
